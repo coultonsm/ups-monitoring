@@ -1,13 +1,85 @@
-from pysnmp.hlapi import *
+import asyncio
+from pysnmp.hlapi.v3arch.asyncio import (
+    ContextData,
+    EndOfMibView,
+    ObjectIdentity,
+    ObjectType,
+    SnmpEngine,
+    UdpTransportTarget,
+    UsmUserData,
+    get_cmd,
+    usmAesCfb128Protocol,
+    usmHMACSHAAuthProtocol,
+    walk_cmd,
+)
 from oid_maps import *
 from datetime import datetime
 import threading
 import hashlib
 import dateutil
-from config import SNMP_RETRIES, SNMP_TIMEOUT, LOCAL_ADDRESS
+
+from config import LOCAL_ADDRESS, SNMP_TIMEOUT
+
+async def _snmp_get(ip, user_data, oid_request, local_address):
+    with SnmpEngine() as engine:
+        target = await UdpTransportTarget.create(
+            (ip, 161), retries=1, timeout=SNMP_TIMEOUT
+        )
+        target.set_local_address((local_address, 0))
+        return await get_cmd(
+            engine,
+            user_data,
+            target,
+            ContextData(),
+            *oid_request,
+            lookupMib=False
+        )
+
+
+async def _snmp_walk(ip, base_oid, user_data, local_address):
+    results = []
+    with SnmpEngine() as engine:
+        target = await UdpTransportTarget.create(
+            (ip, 161), retries=1, timeout=SNMP_TIMEOUT
+        )
+        target.set_local_address((local_address, 0))
+        async for error_indication, error_status, error_index, var_binds in walk_cmd(
+            engine,
+            user_data,
+            target,
+            ContextData(),
+            ObjectType(ObjectIdentity(base_oid)),
+            lexicographicMode=False,
+            lookupMib=False,
+        ):
+            if error_indication:
+                print(f"walk_table: [SNMP ERROR] {ip}: {error_indication}")
+                break
+
+            if error_status:
+                bad_oid = (
+                    var_binds[int(error_index) - 1][0]
+                    if error_index else "unknown"
+                )
+                print(
+                    f"walk_table: [SNMP ERROR] {ip}: {error_status.prettyPrint()} "
+                    f"at {bad_oid}"
+                )
+                break
+
+            results.extend(
+                (oid.prettyPrint(), value)
+                for oid, value in var_binds
+                if not isinstance(value, EndOfMibView)
+            )
+
+    return results
+
 
 #Data gathering functions
-def fetch_basic_ups_info(ip, user_data, model, local_address=LOCAL_ADDRESS) -> list:
+def fetch_basic_ups_info(
+    ip, user_data, model, local_address=LOCAL_ADDRESS
+) -> list:
     """
     Fetch and decode APC UPS scalar information.
     Returns a dictionary of decoded UPS values.
@@ -29,26 +101,15 @@ def fetch_basic_ups_info(ip, user_data, model, local_address=LOCAL_ADDRESS) -> l
     
     """
 
-    transport_target = UdpTransportTarget((ip, 161), retries=SNMP_RETRIES, timeout=SNMP_TIMEOUT)
-    transport_target.setLocalAddress((local_address, 0))
-
     oid_map = model_oid_maps.get(model)
     if not oid_map:
         print(f"fetch_basic_ups_info:: [ERROR] No OID map found for model {model}")
         return None
 
     oid_request = [ObjectType(ObjectIdentity(oid_str)) for oid_str in oid_map]
-
-    walk = getCmd(
-        SnmpEngine(),
-        user_data,
-        transport_target,
-        ContextData(),
-        *oid_request,
-        lookupMib=False
+    errorIndication, errorStatus, errorIndex, varBinds = asyncio.run(
+        _snmp_get(ip, user_data, oid_request, local_address)
     )
-
-    errorIndication, errorStatus, errorIndex, varBinds = next(walk)
 
     if errorIndication:
         print(f"fetch_basic_ups_info:: [SNMP ERROR] {ip}: {errorIndication}")
@@ -120,47 +181,20 @@ def walk_table(ip, base_oid, user_data, local_address=LOCAL_ADDRESS):
     - On any error, the function prints a message and stops walking.
     """
 
-    transport_target = UdpTransportTarget((ip, 161), retries=SNMP_RETRIES, timeout=SNMP_TIMEOUT)
-    transport_target.setLocalAddress((local_address, 0))
+    yield from asyncio.run(_snmp_walk(ip, base_oid, user_data, local_address))
 
-    for (errorIndication,
-         errorStatus,
-         errorIndex,
-         varBinds) in nextCmd(
-            SnmpEngine(),
-            user_data,
-            transport_target,
-            ContextData(),
-            ObjectType(ObjectIdentity(base_oid)),
-            lexicographicMode=False
-        ):
-
-        if errorIndication:
-            print(f"walk_table: [SNMP ERROR] {ip}: {errorIndication}")
-            return
-
-        if errorStatus:
-            bad_oid = (
-                varBinds[int(errorIndex) - 1][0]
-                if errorIndex else "unknown"
-            )
-            print(
-                f"walk_table: [SNMP ERROR] {ip}: {errorStatus.prettyPrint()} "
-                f"at {bad_oid}"
-            )
-            return
-
-        for oid, value in varBinds:
-            yield oid.prettyPrint(), value
-
-def fetch_ups_temp_info(ip, user_data, model, local_address=LOCAL_ADDRESS) -> list:
+def fetch_ups_temp_info(
+    ip, user_data, model, local_address=LOCAL_ADDRESS
+) -> list:
     """
     Walks the UPS temperature sensor table and returns a dictionary:
     {sensor_index: {name, temp_f, alarm_raw, violation_raw}}
     """
     if model == 'APC':
         rows = {}
-        for oid_str, value in walk_table(ip, '1.3.6.1.4.1.318.1.1.25.1.2', user_data):
+        for oid_str, value in walk_table(
+            ip, '1.3.6.1.4.1.318.1.1.25.1.2', user_data, local_address
+        ):
             parts = oid_str.split('.')
             col = parts[-3]  # column in the table
             idx = parts[-2]  # sensor index
@@ -181,7 +215,9 @@ def fetch_ups_temp_info(ip, user_data, model, local_address=LOCAL_ADDRESS) -> li
         print(f"fetch_ups_temp_info:: [ERROR] No OID map found for model {model}")
         return None
 
-def fetch_APC_contact_sensor_info(ip, user_data, local_address=LOCAL_ADDRESS) -> dict:
+def fetch_APC_contact_sensor_info(
+    ip, user_data, local_address=LOCAL_ADDRESS
+) -> dict:
     """    
     Retrieves information for the Universal I/O contact sensors.
 
@@ -209,35 +245,24 @@ def fetch_APC_contact_sensor_info(ip, user_data, local_address=LOCAL_ADDRESS) ->
     ALARM_STATUS_MAP = {1: 'normal', 2: 'warning', 3: 'critical', 4: 'notApplicable'}
     COMM_STATUS_MAP = {1: 'notInstalled', 2: 'commsOK', 3: 'commsLost'}
 
-    transport_target = UdpTransportTarget((ip, 161), retries=SNMP_RETRIES, timeout=SNMP_TIMEOUT)
-    transport_target.setLocalAddress((local_address, 0))
+    for oid_str, value in walk_table(ip, BASE_OID, user_data, local_address):
+        parts = oid_str.split('.')
+        column = parts[-3]
+        # combine last two OID components to get unique row index
+        index = f"{parts[-2]}_{parts[-1]}"
 
-    for (_, _, _, varBinds) in nextCmd(
-        SnmpEngine(),
-        user_data,
-        transport_target,
-        ContextData(),
-        ObjectType(ObjectIdentity(BASE_OID)),
-        lexicographicMode=False
-    ):
-        for oid, value in varBinds:
-            parts = oid.prettyPrint().split('.')
-            column = parts[-3]
-            # combine last two OID components to get unique row index
-            index = f"{parts[-2]}_{parts[-1]}"
+        rows.setdefault(index, {})
 
-            rows.setdefault(index, {})
-
-            if column == '3':  # Contact Name
-                rows[index]['name'] = str(value)
-            elif column == '4':  # Location
-                rows[index]['location'] = str(value)
-            elif column == '5':  # Current State
-                rows[index]['state'] = INPUT_STATE_MAP.get(int(value), 'unknown')
-            elif column == '6':  # Alarm Status
-                rows[index]['alarm'] = ALARM_STATUS_MAP.get(int(value), 'unknown')
-            elif column == '7':  # Comm Status
-                rows[index]['comm'] = COMM_STATUS_MAP.get(int(value), 'unknown')
+        if column == '3':  # Contact Name
+            rows[index]['name'] = str(value)
+        elif column == '4':  # Location
+            rows[index]['location'] = str(value)
+        elif column == '5':  # Current State
+            rows[index]['state'] = INPUT_STATE_MAP.get(int(value), 'unknown')
+        elif column == '6':  # Alarm Status
+            rows[index]['alarm'] = ALARM_STATUS_MAP.get(int(value), 'unknown')
+        elif column == '7':  # Comm Status
+            rows[index]['comm'] = COMM_STATUS_MAP.get(int(value), 'unknown')
 
     return rows
 
