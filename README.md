@@ -51,12 +51,12 @@ An in-progress experimental version is being tested using **Python 3.13** for a 
 - SNMPv3 credentials for your APC devices (username + auth key + privacy key).
 - An SMTP server to send alerts.
 
-Install dependencies into a virtual environment:
+Install dependencies into a virtual environment with `uv`:
 
 ```bash
-python3.9 -m venv .venv
+uv venv
 source .venv/bin/activate
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ---
@@ -72,8 +72,9 @@ Expected columns:
 ip,name,importance
 10.1.2.30,Residence Hall 2F,High
 10.1.2.31,Basement UPS,Normal
-# 10.1.2.32,Decommissioned,Low
+# 10.1.2.32,Decommissioned,Normal
 ```
+Importance reflects whether the High Importance flag is added onto the notification e-mail.
 
 ### 2. SNMP credentials
 
