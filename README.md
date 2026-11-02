@@ -2,8 +2,8 @@
 
 A lightweight, multi-threaded monitoring service for **APC UPS devices**. It polls each unit over **SNMPv3**, evaluates its health against a set of alarm conditions, stores alarm history in a local SQLite database, and dispatches email alerts and daily summaries.
 
-The project is written for **Python 3.9** and depends on `pysnmp` for SNMP access.
-An in-progress experimental version is being tested using **Python 3.13** for a more up-to-date codebase.
+The experimental branch is written for **Python 3.13** and depends on `pysnmp` for SNMP access.
+Core functionality is the same, with new routines for `pysnmp` 7.
 
 ---
 
@@ -47,7 +47,7 @@ An in-progress experimental version is being tested using **Python 3.13** for a 
 
 ## Requirements
 
-- **Python 3.9** (see `.python-version`; `pyproject.toml` pins `==3.9.25`).
+- **Python 3.13** (see `.python-version`; `pyproject.toml` pins `=>3.13`).
 - SNMPv3 credentials for your APC devices (username + auth key + privacy key).
 - An SMTP server to send alerts.
 
